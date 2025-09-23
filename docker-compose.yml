@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: gyroskop-postgres
+    environment:
+      POSTGRES_DB: gyroskop
+      POSTGRES_USER: gyroskop
+      POSTGRES_PASSWORD: gyroskop123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gyroskop -d gyroskop"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  gyroskop:
+    build: .
+    container_name: gyroskop-bot
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_NAME=gyroskop
+      - POSTGRES_USER=gyroskop
+      - POSTGRES_PASSWORD=gyroskop123
+      - POSTGRES_SSLMODE=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    # Optional: Health check
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep gyroskop || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  postgres_data:
