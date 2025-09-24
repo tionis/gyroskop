@@ -262,3 +262,29 @@ func (db *DB) GetOrder(gyroskopID int, userID int64) (*Order, error) {
 
 	return &o, nil
 }
+
+// GetGyroskopByMessageID gets a gyroskop by its message ID
+func (db *DB) GetGyroskopByMessageID(chatID int64, messageID int) (*Gyroskop, error) {
+	row := db.QueryRow(`
+		SELECT id, chat_id, created_by, message_id, deadline, is_open, created_at
+		FROM gyroskops WHERE chat_id = $1 AND message_id = $2`,
+		chatID, messageID,
+	)
+
+	var g Gyroskop
+	err := row.Scan(&g.ID, &g.ChatID, &g.CreatedBy, &g.MessageID, &g.Deadline, &g.IsOpen, &g.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	return &g, nil
+}
+
+// ReopenGyroskop reopens a closed gyroskop with a new deadline
+func (db *DB) ReopenGyroskop(gyroskopID int, deadline time.Time) error {
+	_, err := db.Exec(`
+		UPDATE gyroskops SET is_open = true, deadline = $1 WHERE id = $2`,
+		deadline, gyroskopID,
+	)
+	return err
+}

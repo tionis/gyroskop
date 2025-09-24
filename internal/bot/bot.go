@@ -3,6 +3,7 @@ package bot
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -101,7 +102,11 @@ func (b *Bot) handleHelp(message *tgbotapi.Message) {
 	helpText := `🥙 *Gyroskop Bot - Gyros Bestellungen koordinieren*
 
 *Befehle:*
+/gyroskop - Neues Gyroskop für 15 Minuten öffnen
 /gyroskop HH:MM - Neues Gyroskop bis zur angegebenen Uhrzeit öffnen
+/gyroskop 30min - Neues Gyroskop für 30 Minuten öffnen
+/gyroskop (als Antwort) - Gyroskop wiedereröffnen für 15 Minuten
+/gyroskop HH:MM (als Antwort) - Gyroskop mit neuer Deadline wiedereröffnen
 /status - Aktuellen Status anzeigen
 /ende - Gyroskop beenden (nur als Antwort auf Gyroskop-Nachricht)
 /stornieren - Eigene Bestellung stornieren
@@ -113,7 +118,9 @@ func (b *Bot) handleHelp(message *tgbotapi.Message) {
 ❌ *Stornieren:* Schreibe "0" oder nutze den ❌ Stornieren Button
 
 *Beispiele:*
+/gyroskop - Öffnet Gyroskop für 15 Minuten
 /gyroskop 17:00 - Öffnet Gyroskop bis 17:00 Uhr
+/gyroskop 45min - Öffnet Gyroskop für 45 Minuten
 🥩 2️⃣ Button - Bestellt 2 Gyros mit Fleisch
 🥬 1️⃣ Button - Bestellt 1 vegetarisches Gyros
 0 - Storniert die komplette Bestellung`
@@ -121,26 +128,30 @@ func (b *Bot) handleHelp(message *tgbotapi.Message) {
 	b.sendMessage(message.Chat.ID, helpText)
 }
 
-// handleNewGyroskop creates a new gyroskop
+// handleNewGyroskop creates a new gyroskop or reopens an existing one
 func (b *Bot) handleNewGyroskop(message *tgbotapi.Message, args string) {
-	if args == "" {
-		b.sendMessage(message.Chat.ID, "⚠️ Bitte gib eine Uhrzeit an: /gyroskop 17:00")
+	// Check if this is a reply to a gyroskop message (reopen functionality)
+	if message.ReplyToMessage != nil {
+		b.handleReopenGyroskop(message, args)
 		return
 	}
 
-	// Parse time
-	deadline, err := b.parseTime(args)
+	// Check if there's already an active gyroskop
+	if existingGyroskop, exists := b.activeGyroskops[message.Chat.ID]; exists {
+		berlin, _ := time.LoadLocation("Europe/Berlin")
+		deadlineInBerlin := existingGyroskop.Deadline.In(berlin)
+		b.sendMessage(message.Chat.ID, fmt.Sprintf("⚠️ Es gibt bereits ein aktives Gyroskop bis %s. Nutze /ende als Antwort auf die Gyroskop-Nachricht um es zu beenden.", deadlineInBerlin.Format("15:04")))
+		return
+	}
+
+	// Parse deadline from args or use default (15 minutes)
+	deadline, err := b.parseDeadline(args)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, "⚠️ Ungültiges Zeitformat. Verwende HH:MM (z.B. 17:00)")
+		b.sendMessage(message.Chat.ID, "⚠️ Ungültiges Zeitformat. Verwende HH:MM (z.B. 17:00) oder Dauer (z.B. 30min)")
 		return
 	}
 
-	// Prüfen ob die Zeit in der Zukunft liegt
-	if deadline.Before(time.Now()) {
-		b.sendMessage(message.Chat.ID, "⚠️ Die angegebene Zeit liegt in der Vergangenheit!")
-		return
-	}
-
+	// Create new gyroskop
 	gyroskop, err := b.db.CreateGyroskop(message.Chat.ID, int64(message.From.ID), deadline)
 	if err != nil {
 		log.Printf("Fehler beim Erstellen des Gyroskops: %v", err)
@@ -148,25 +159,84 @@ func (b *Bot) handleNewGyroskop(message *tgbotapi.Message, args string) {
 		return
 	}
 
-	userName := b.getUserName(message.From)
-	text := fmt.Sprintf("🥙 *Gyroskop geöffnet!*\n\n"+
+	b.sendGyroskopMessage(message.Chat.ID, gyroskop, "🥙 *Gyroskop geöffnet!*", message.From)
+}
+
+// handleReopenGyroskop reopens a closed gyroskop
+func (b *Bot) handleReopenGyroskop(message *tgbotapi.Message, args string) {
+	// Check if user is the creator by checking the replied message
+	replyMessage := message.ReplyToMessage
+
+	// Try to find the gyroskop by message ID
+	gyroskop, err := b.db.GetGyroskopByMessageID(message.Chat.ID, replyMessage.MessageID)
+	if err != nil {
+		b.sendMessage(message.Chat.ID, "❌ Das ist keine gültige Gyroskop-Nachricht")
+		return
+	}
+
+	// Check if user is the creator
+	if gyroskop.CreatedBy != int64(message.From.ID) {
+		b.sendMessage(message.Chat.ID, "⚠️ Nur der Ersteller kann das Gyroskop wiedereröffnen!")
+		return
+	}
+
+	// Check if there's already an active gyroskop
+	if existingGyroskop, exists := b.activeGyroskops[message.Chat.ID]; exists {
+		berlin, _ := time.LoadLocation("Europe/Berlin")
+		deadlineInBerlin := existingGyroskop.Deadline.In(berlin)
+		b.sendMessage(message.Chat.ID, fmt.Sprintf("⚠️ Es gibt bereits ein aktives Gyroskop bis %s. Beende es zuerst.", deadlineInBerlin.Format("15:04")))
+		return
+	}
+
+	// Parse new deadline or use default (15 minutes)
+	deadline, err := b.parseDeadline(args)
+	if err != nil {
+		b.sendMessage(message.Chat.ID, "⚠️ Ungültiges Zeitformat. Verwende HH:MM (z.B. 17:00) oder Dauer (z.B. 30min)")
+		return
+	}
+
+	// Reopen the gyroskop
+	err = b.db.ReopenGyroskop(gyroskop.ID, deadline)
+	if err != nil {
+		log.Printf("Fehler beim Wiedereröffnen des Gyroskops: %v", err)
+		b.sendMessage(message.Chat.ID, "❌ Fehler beim Wiedereröffnen des Gyroskops")
+		return
+	}
+
+	// Update gyroskop data
+	gyroskop.Deadline = deadline
+	gyroskop.IsOpen = true
+
+	b.sendGyroskopMessage(message.Chat.ID, gyroskop, "🔄 *Gyroskop wiedereröffnet!*", message.From)
+}
+
+// sendGyroskopMessage sends the gyroskop message with proper formatting
+func (b *Bot) sendGyroskopMessage(chatID int64, gyroskop *database.Gyroskop, title string, user *tgbotapi.User) {
+	userName := b.getUserName(user)
+
+	// Convert deadline to Berlin timezone for display
+	berlin, _ := time.LoadLocation("Europe/Berlin")
+	deadlineInBerlin := gyroskop.Deadline.In(berlin)
+
+	text := fmt.Sprintf("%s\n\n"+
 		"👤 Erstellt von: %s\n"+
-		"⏰ Deadline: %s\n\n"+
+		"⏰ Deadline: %s Uhr\n\n"+
 		"Schreibt eine Zahl um Gyros zu bestellen!\n"+
 		"Oder nutzt die Reaction-Buttons: 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣\n\n"+
 		"Zum Beenden: Antwortet auf diese Nachricht mit /ende",
+		title,
 		userName,
-		deadline.Format("15:04"),
+		deadlineInBerlin.Format("15:04"),
 	)
 
-	// Gyroskop in Cache speichern
-	b.activeGyroskops[message.Chat.ID] = gyroskop
+	// Add gyroskop to cache
+	b.activeGyroskops[chatID] = gyroskop
 
-	// Nachricht senden mit Reaction-Buttons und Message-ID speichern
-	sentMessage := b.sendMessageWithReactions(message.Chat.ID, text)
+	// Send message with reaction buttons and save message ID
+	sentMessage := b.sendMessageWithReactions(chatID, text)
 	if sentMessage != nil {
-		// Message-ID in der Datenbank speichern
-		err = b.db.UpdateGyroskopMessageID(gyroskop.ID, sentMessage.MessageID)
+		// Update message ID in database
+		err := b.db.UpdateGyroskopMessageID(gyroskop.ID, sentMessage.MessageID)
 		if err != nil {
 			log.Printf("Error saving message ID: %v", err)
 		}
@@ -285,27 +355,72 @@ func (b *Bot) handleTextMessage(message *tgbotapi.Message) {
 	b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ %s hat die Bestellung storniert", userName))
 }
 
-// parseTime parses a time string in HH:MM format
-func (b *Bot) parseTime(timeStr string) (time.Time, error) {
-	now := time.Now()
-	parsedTime, err := time.Parse("15:04", strings.TrimSpace(timeStr))
+// parseDeadline parses a deadline from various formats or returns default (15 minutes from now)
+func (b *Bot) parseDeadline(input string) (time.Time, error) {
+	input = strings.TrimSpace(input)
+
+	// If no input, default to 15 minutes from now
+	if input == "" {
+		return time.Now().Add(15 * time.Minute), nil
+	}
+
+	// Load Berlin timezone
+	berlin, err := time.LoadLocation("Europe/Berlin")
 	if err != nil {
 		return time.Time{}, err
 	}
 
-	// Kombiniere heutiges Datum mit der angegebenen Zeit
-	deadline := time.Date(
-		now.Year(), now.Month(), now.Day(),
-		parsedTime.Hour(), parsedTime.Minute(), 0, 0,
-		now.Location(),
-	)
+	now := time.Now().In(berlin)
 
-	// Wenn die Zeit heute schon vorbei ist, nimm morgen
-	if deadline.Before(now) {
-		deadline = deadline.AddDate(0, 0, 1)
+	// Check for duration format (e.g., "15min", "30min", "1h")
+	durationRegex := regexp.MustCompile(`^(\d+)(min|m|h|hour|hours)$`)
+	if matches := durationRegex.FindStringSubmatch(input); len(matches) == 3 {
+		value, err := strconv.Atoi(matches[1])
+		if err != nil {
+			return time.Time{}, err
+		}
+
+		var duration time.Duration
+		unit := strings.ToLower(matches[2])
+		switch unit {
+		case "min", "m":
+			duration = time.Duration(value) * time.Minute
+		case "h", "hour", "hours":
+			duration = time.Duration(value) * time.Hour
+		}
+
+		if duration == 0 {
+			return time.Time{}, fmt.Errorf("invalid duration")
+		}
+
+		return now.Add(duration).UTC(), nil
 	}
 
-	return deadline, nil
+	// Check for time format (HH:MM)
+	timeRegex := regexp.MustCompile(`^\d{1,2}:\d{2}$`)
+	if timeRegex.MatchString(input) {
+		// Parse as time today in Berlin timezone
+		parsedTime, err := time.ParseInLocation("15:04", input, berlin)
+		if err != nil {
+			return time.Time{}, err
+		}
+
+		// Combine today's date with the parsed time
+		deadline := time.Date(
+			now.Year(), now.Month(), now.Day(),
+			parsedTime.Hour(), parsedTime.Minute(), 0, 0,
+			berlin,
+		)
+
+		// If the time is in the past, use tomorrow
+		if deadline.Before(now) {
+			deadline = deadline.AddDate(0, 0, 1)
+		}
+
+		return deadline.UTC(), nil
+	}
+
+	return time.Time{}, fmt.Errorf("invalid format")
 }
 
 // handleEndGyroskop ends the gyroskop (reply only)
@@ -492,8 +607,12 @@ func (b *Bot) handleCancelOrderCallback(query *tgbotapi.CallbackQuery) {
 func (b *Bot) formatCurrentStatus(gyroskop *database.Gyroskop, orders []database.Order) string {
 	var text strings.Builder
 
+	// Convert deadline to Berlin timezone for display
+	berlin, _ := time.LoadLocation("Europe/Berlin")
+	deadlineInBerlin := gyroskop.Deadline.In(berlin)
+
 	text.WriteString("📊 *Aktueller Status*\n")
-	text.WriteString(fmt.Sprintf("⏰ Deadline: %s\n\n", gyroskop.Deadline.Format("15:04")))
+	text.WriteString(fmt.Sprintf("⏰ Deadline: %s Uhr\n\n", deadlineInBerlin.Format("15:04")))
 
 	if len(orders) == 0 {
 		text.WriteString("Noch keine Bestellungen 😢")
@@ -537,8 +656,12 @@ func (b *Bot) formatCurrentStatus(gyroskop *database.Gyroskop, orders []database
 func (b *Bot) formatOrderSummary(gyroskop *database.Gyroskop, orders []database.Order) string {
 	var text strings.Builder
 
+	// Convert deadline to Berlin timezone for display
+	berlin, _ := time.LoadLocation("Europe/Berlin")
+	deadlineInBerlin := gyroskop.Deadline.In(berlin)
+
 	text.WriteString("📊 *Finale Bestellübersicht*\n")
-	text.WriteString(fmt.Sprintf("⏰ Deadline war: %s\n\n", gyroskop.Deadline.Format("15:04")))
+	text.WriteString(fmt.Sprintf("⏰ Deadline war: %s Uhr\n\n", deadlineInBerlin.Format("15:04")))
 
 	if len(orders) == 0 {
 		text.WriteString("Keine Bestellungen eingegangen 😢")
@@ -694,12 +817,16 @@ func (b *Bot) updateGyroskopMessage(gyroskop *database.Gyroskop, originalMessage
 		creatorName = fmt.Sprintf("User %d", gyroskop.CreatedBy)
 	}
 
+	// Convert deadline to Berlin timezone for display
+	berlin, _ := time.LoadLocation("Europe/Berlin")
+	deadlineInBerlin := gyroskop.Deadline.In(berlin)
+
 	// Neue Nachricht zusammenstellen
 	text := fmt.Sprintf("🥙 *Gyroskop geöffnet!*\n\n"+
 		"👤 Erstellt von: %s\n"+
-		"⏰ Deadline: %s\n\n",
+		"⏰ Deadline: %s Uhr\n\n",
 		creatorName,
-		gyroskop.Deadline.Format("15:04"))
+		deadlineInBerlin.Format("15:04"))
 
 	// Aktuelle Bestellungen hinzufügen
 	if len(orders) > 0 {
