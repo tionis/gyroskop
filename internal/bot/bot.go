@@ -115,7 +115,7 @@ func (b *Bot) handleHelp(message *tgbotapi.Message) {
 *Bestellen:*
 🥩 *Mit Fleisch:* Nutze die Buttons 1️⃣-5️⃣ unter "Mit Fleisch"
 🥬 *Vegetarisch:* Nutze die Buttons 1️⃣-5️⃣ unter "Vegetarisch"
-💬 *Text:* Schreibe "2m" (2 mit Fleisch), "3v" (3 vegetarisch), "1m2v" (1 Fleisch + 2 vegetarisch)
+💬 *Text:* Schreibe "2f" (2 mit Fleisch), "3v" (3 vegetarisch), "1f2v" (1 Fleisch + 2 vegetarisch)
 ❌ *Stornieren:* Schreibe "0" oder nutze den ❌ Stornieren Button
 
 *Beispiele:*
@@ -124,9 +124,9 @@ func (b *Bot) handleHelp(message *tgbotapi.Message) {
 /gyroskop 45min - Öffnet Gyroskop für 45 Minuten
 🥩 2️⃣ Button - Bestellt 2 Gyros mit Fleisch
 🥬 1️⃣ Button - Bestellt 1 vegetarisches Gyros
-2m - Bestellt 2 Gyros mit Fleisch
+2f - Bestellt 2 Gyros mit Fleisch
 3v - Bestellt 3 vegetarische Gyros
-1m2v - Bestellt 1 Gyros mit Fleisch und 2 vegetarische
+1f2v - Bestellt 1 Gyros mit Fleisch und 2 vegetarische
 0 - Storniert die komplette Bestellung`
 
 	b.sendMessage(message.Chat.ID, helpText)
@@ -248,7 +248,7 @@ func (b *Bot) sendGyroskopMessage(chatID int64, gyroskop *database.Gyroskop, tit
 	text := fmt.Sprintf("%s\n\n"+
 		"👤 Erstellt von: %s\n"+
 		"⏰ Deadline: %s Uhr\n\n"+
-		"Zum Bestellen schreibt '2m' (Fleisch), '3v' (vegetarisch), '1m2v' (gemischt)!\n"+
+		"Zum Bestellen schreibt '2f' (Fleisch), '3v' (vegetarisch), '1f2v' (gemischt)!\n"+
 		"Oder nutzt die Buttons unten.\n\n"+
 		"Zum Beenden: /ende",
 		title,
@@ -367,10 +367,12 @@ func (b *Bot) handleTextMessage(message *tgbotapi.Message) {
 			return
 		}
 		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ %s hat die Bestellung storniert", userName))
+		// Update the gyroskop message with current orders
+		b.updateGyroskopMessage(gyroskop, message)
 		return
 	}
 
-	// Parse order syntax: "2m", "3v", "1m2v", etc.
+	// Parse order syntax: "2f", "3v", "1f2v", etc.
 	meatQuantity, veggieQuantity, err := b.parseOrderText(text)
 	if err != nil {
 		return // Ignore invalid formats
@@ -416,12 +418,15 @@ func (b *Bot) handleTextMessage(message *tgbotapi.Message) {
 	}
 
 	b.sendMessage(message.Chat.ID, fmt.Sprintf("✅ %s: %s", userName, orderText))
+
+	// Update the gyroskop message with current orders
+	b.updateGyroskopMessage(gyroskop, message)
 }
 
-// parseOrderText parses order text like "2m", "3v", "1m2v" and returns meat and veggie quantities
+// parseOrderText parses order text like "2f", "3v", "1f2v" and returns meat and veggie quantities
 func (b *Bot) parseOrderText(text string) (int, int, error) {
-	// Use regex to parse orders like "2m", "3v", "1m2v"
-	orderRegex := regexp.MustCompile(`^(?:(\d+)m)?(?:(\d+)v)?$`)
+	// Use regex to parse orders like "2f", "3v", "1f2v"
+	orderRegex := regexp.MustCompile(`^(?:(\d+)f)?(?:(\d+)v)?$`)
 	matches := orderRegex.FindStringSubmatch(text)
 
 	if len(matches) == 0 {
@@ -954,7 +959,7 @@ func (b *Bot) updateGyroskopMessage(gyroskop *database.Gyroskop, originalMessage
 		text += "📋 *Noch keine Bestellungen*\n\n"
 	}
 
-	text += "Zum Bestellen schreibt '2m' (Fleisch), '3v' (vegetarisch), '1m2v' (gemischt)!\n"
+	text += "Zum Bestellen schreibt '2f' (Fleisch), '3v' (vegetarisch), '1f2v' (gemischt)!\n"
 	text += "Oder nutzt die Buttons für 🥩 Fleisch oder 🥬 vegetarisch\n\n"
 	text += "Zum Beenden: /ende"
 
