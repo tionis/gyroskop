@@ -108,13 +108,14 @@ func (b *Bot) handleHelp(message *tgbotapi.Message) {
 /gyroskop (als Antwort) - Gyroskop wiedereröffnen oder Deadline ändern (15min)
 /gyroskop HH:MM (als Antwort) - Gyroskop wiedereröffnen oder Deadline ändern
 /status - Aktuellen Status anzeigen
-/ende - Gyroskop beenden (nur als Antwort auf Gyroskop-Nachricht)
+/ende - Gyroskop beenden (nur Ersteller)
 /stornieren - Eigene Bestellung stornieren
 /help - Diese Hilfe anzeigen
 
 *Bestellen:*
 🥩 *Mit Fleisch:* Nutze die Buttons 1️⃣-5️⃣ unter "Mit Fleisch"
 🥬 *Vegetarisch:* Nutze die Buttons 1️⃣-5️⃣ unter "Vegetarisch"
+💬 *Text:* Schreibe "2m" (2 mit Fleisch), "3v" (3 vegetarisch), "1m2v" (1 Fleisch + 2 vegetarisch)
 ❌ *Stornieren:* Schreibe "0" oder nutze den ❌ Stornieren Button
 
 *Beispiele:*
@@ -123,6 +124,9 @@ func (b *Bot) handleHelp(message *tgbotapi.Message) {
 /gyroskop 45min - Öffnet Gyroskop für 45 Minuten
 🥩 2️⃣ Button - Bestellt 2 Gyros mit Fleisch
 🥬 1️⃣ Button - Bestellt 1 vegetarisches Gyros
+2m - Bestellt 2 Gyros mit Fleisch
+3v - Bestellt 3 vegetarische Gyros
+1m2v - Bestellt 1 Gyros mit Fleisch und 2 vegetarische
 0 - Storniert die komplette Bestellung`
 
 	b.sendMessage(message.Chat.ID, helpText)
@@ -244,9 +248,9 @@ func (b *Bot) sendGyroskopMessage(chatID int64, gyroskop *database.Gyroskop, tit
 	text := fmt.Sprintf("%s\n\n"+
 		"👤 Erstellt von: %s\n"+
 		"⏰ Deadline: %s Uhr\n\n"+
-		"Schreibt eine Zahl um Gyros zu bestellen!\n"+
-		"Oder nutzt die Reaction-Buttons: 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣\n\n"+
-		"Zum Beenden: Antwortet auf diese Nachricht mit /ende",
+		"Zum Bestellen schreibt '2m' (Fleisch), '3v' (vegetarisch), '1m2v' (gemischt)!\n"+
+		"Oder nutzt die Buttons unten.\n\n"+
+		"Zum Beenden: /ende",
 		title,
 		userName,
 		deadlineInBerlin.Format("15:04"),
@@ -339,26 +343,12 @@ func (b *Bot) handleCancelOrder(message *tgbotapi.Message) {
 
 // handleTextMessage processes text messages (Bestellungen)
 func (b *Bot) handleTextMessage(message *tgbotapi.Message) {
-	// Für das neue System mit zwei Gyros-Arten nutzen wir hauptsächlich die Buttons
-	// Texteingabe ist nur noch für einfache Stornierung (0) gedacht
+	text := strings.TrimSpace(strings.ToLower(message.Text))
 
-	quantity, err := strconv.Atoi(strings.TrimSpace(message.Text))
-	if err != nil {
-		return // Ignorieren wenn es keine Zahl ist
-	}
-
-	// Nur 0 für Stornierung akzeptieren
-	if quantity != 0 {
-		_, exists := b.activeGyroskops[message.Chat.ID]
-		if exists {
-			b.sendMessage(message.Chat.ID, "💡 Nutze die Buttons um zwischen 🥩 Fleisch und 🥬 vegetarischen Gyros zu wählen!")
-		}
-		return
-	}
-
+	// Check if there's an active gyroskop
 	gyroskop, exists := b.activeGyroskops[message.Chat.ID]
 	if !exists {
-		return // Ignorieren wenn kein aktives Gyroskop
+		return // Ignore if no active gyroskop
 	}
 
 	// Check if the gyroskop is still open
@@ -369,13 +359,95 @@ func (b *Bot) handleTextMessage(message *tgbotapi.Message) {
 
 	userName := b.getUserName(message.From)
 
-	// Bestellung stornieren (0 eingegeben)
-	err = b.db.RemoveOrder(gyroskop.ID, int64(message.From.ID))
-	if err != nil {
-		log.Printf("Error canceling order: %v", err)
+	// Handle cancellation (0)
+	if text == "0" {
+		err := b.db.RemoveOrder(gyroskop.ID, int64(message.From.ID))
+		if err != nil {
+			log.Printf("Error canceling order: %v", err)
+			return
+		}
+		b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ %s hat die Bestellung storniert", userName))
 		return
 	}
-	b.sendMessage(message.Chat.ID, fmt.Sprintf("❌ %s hat die Bestellung storniert", userName))
+
+	// Parse order syntax: "2m", "3v", "1m2v", etc.
+	meatQuantity, veggieQuantity, err := b.parseOrderText(text)
+	if err != nil {
+		return // Ignore invalid formats
+	}
+
+	// If both are 0, ignore
+	if meatQuantity == 0 && veggieQuantity == 0 {
+		return
+	}
+
+	// Add or update order
+	err = b.db.AddOrUpdateOrder(
+		gyroskop.ID,
+		int64(message.From.ID),
+		message.From.UserName,
+		message.From.FirstName,
+		message.From.LastName,
+		meatQuantity,
+		veggieQuantity,
+	)
+	if err != nil {
+		log.Printf("Error adding order: %v", err)
+		b.sendMessage(message.Chat.ID, "❌ Fehler beim Bestellen")
+		return
+	}
+
+	// Format response message
+	var orderText string
+	if meatQuantity > 0 && veggieQuantity > 0 {
+		orderText = fmt.Sprintf("🥩 %d mit Fleisch, 🥬 %d vegetarisch", meatQuantity, veggieQuantity)
+	} else if meatQuantity > 0 {
+		if meatQuantity == 1 {
+			orderText = "🥩 1 mit Fleisch"
+		} else {
+			orderText = fmt.Sprintf("🥩 %d mit Fleisch", meatQuantity)
+		}
+	} else if veggieQuantity > 0 {
+		if veggieQuantity == 1 {
+			orderText = "🥬 1 vegetarisch"
+		} else {
+			orderText = fmt.Sprintf("🥬 %d vegetarisch", veggieQuantity)
+		}
+	}
+
+	b.sendMessage(message.Chat.ID, fmt.Sprintf("✅ %s: %s", userName, orderText))
+}
+
+// parseOrderText parses order text like "2m", "3v", "1m2v" and returns meat and veggie quantities
+func (b *Bot) parseOrderText(text string) (int, int, error) {
+	// Use regex to parse orders like "2m", "3v", "1m2v"
+	orderRegex := regexp.MustCompile(`^(?:(\d+)m)?(?:(\d+)v)?$`)
+	matches := orderRegex.FindStringSubmatch(text)
+
+	if len(matches) == 0 {
+		return 0, 0, fmt.Errorf("invalid format")
+	}
+
+	var meatQuantity, veggieQuantity int
+	var err error
+
+	// Parse meat quantity
+	if matches[1] != "" {
+		meatQuantity, err = strconv.Atoi(matches[1])
+		if err != nil || meatQuantity < 0 || meatQuantity > 10 {
+			return 0, 0, fmt.Errorf("invalid meat quantity")
+		}
+	}
+
+	// Parse veggie quantity
+	if matches[2] != "" {
+		veggieQuantity, err = strconv.Atoi(matches[2])
+		if err != nil || veggieQuantity < 0 || veggieQuantity > 10 {
+			return 0, 0, fmt.Errorf("invalid veggie quantity")
+		}
+	}
+
+	return meatQuantity, veggieQuantity, nil
 }
 
 // parseDeadline parses a deadline from various formats or returns default (15 minutes from now)
@@ -446,14 +518,8 @@ func (b *Bot) parseDeadline(input string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid format")
 }
 
-// handleEndGyroskop ends the gyroskop (reply only)
+// handleEndGyroskop ends the gyroskop created by the user
 func (b *Bot) handleEndGyroskop(message *tgbotapi.Message) {
-	// Check if it is a reply to a message
-	if message.ReplyToMessage == nil {
-		b.sendMessage(message.Chat.ID, "⚠️ /ende muss als Antwort auf die Gyroskop-Nachricht verwendet werden!")
-		return
-	}
-
 	gyroskop, exists := b.activeGyroskops[message.Chat.ID]
 	if !exists {
 		b.sendMessage(message.Chat.ID, "❌ Kein aktives Gyroskop in dieser Gruppe")
@@ -888,9 +954,9 @@ func (b *Bot) updateGyroskopMessage(gyroskop *database.Gyroskop, originalMessage
 		text += "📋 *Noch keine Bestellungen*\n\n"
 	}
 
-	text += "Schreibt eine Zahl um Gyros zu bestellen!\n"
+	text += "Zum Bestellen schreibt '2m' (Fleisch), '3v' (vegetarisch), '1m2v' (gemischt)!\n"
 	text += "Oder nutzt die Buttons für 🥩 Fleisch oder 🥬 vegetarisch\n\n"
-	text += "Zum Beenden: Antwortet auf diese Nachricht mit /ende"
+	text += "Zum Beenden: /ende"
 
 	// Inline Keyboard mit Reaction-Buttons für beide Gyros-Arten erstellen
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
