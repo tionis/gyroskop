@@ -1,6 +1,5 @@
 package bot
 
-
 import (
 	"fmt"
 	"log"
@@ -16,7 +15,7 @@ type Bot struct {
 	api             *tgbotapi.BotAPI
 	db              *database.DB
 	activeGyroskops map[int64]*database.Gyroskop // Cache für aktive Gyroskops
-	timers          map[int]*time.Timer          // Timer für automatisches Schließen
+	stopChan        chan bool                    // Channel to stop the background goroutine
 }
 
 // New erstellt eine neue Bot-Instanz
@@ -30,7 +29,7 @@ func New(token string, db *database.DB) (*Bot, error) {
 		api:             api,
 		db:              db,
 		activeGyroskops: make(map[int64]*database.Gyroskop),
-		timers:          make(map[int]*time.Timer),
+		stopChan:        make(chan bool),
 	}, nil
 }
 
@@ -39,17 +38,26 @@ func (b *Bot) Run() {
 	// Load existing open gyroskops on startup
 	b.loadActiveGyroskops()
 
+	// Start background goroutine to check for expired gyroskops
+	go b.backgroundExpiryChecker()
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
 	updates := b.api.GetUpdatesChan(u)
 
 	for update := range updates {
-		if update.Message != nil {
-			b.handleMessage(update.Message)
-		}
-		if update.CallbackQuery != nil {
-			b.handleCallbackQuery(update.CallbackQuery)
+		select {
+		case <-b.stopChan:
+			log.Println("Bot stopping...")
+			return
+		default:
+			if update.Message != nil {
+				b.handleMessage(update.Message)
+			}
+			if update.CallbackQuery != nil {
+				b.handleCallbackQuery(update.CallbackQuery)
+			}
 		}
 	}
 }
@@ -154,13 +162,6 @@ func (b *Bot) handleNewGyroskop(message *tgbotapi.Message, args string) {
 	// Gyroskop in Cache speichern
 	b.activeGyroskops[message.Chat.ID] = gyroskop
 
-	// Start timer for automatic closing
-	duration := time.Until(deadline)
-	timer := time.AfterFunc(duration, func() {
-		b.autoCloseGyroskop(gyroskop)
-	})
-	b.timers[gyroskop.ID] = timer
-
 	// Nachricht senden mit Reaction-Buttons und Message-ID speichern
 	sentMessage := b.sendMessageWithReactions(message.Chat.ID, text)
 	if sentMessage != nil {
@@ -247,7 +248,7 @@ func (b *Bot) handleCancelOrder(message *tgbotapi.Message) {
 func (b *Bot) handleTextMessage(message *tgbotapi.Message) {
 	// Für das neue System mit zwei Gyros-Arten nutzen wir hauptsächlich die Buttons
 	// Texteingabe ist nur noch für einfache Stornierung (0) gedacht
-	
+
 	quantity, err := strconv.Atoi(strings.TrimSpace(message.Text))
 	if err != nil {
 		return // Ignorieren wenn es keine Zahl ist
@@ -350,12 +351,6 @@ func (b *Bot) closeGyroskop(gyroskop *database.Gyroskop) {
 		log.Printf("Fehler beim Schließen des Gyroskops: %v", err)
 		b.sendMessage(gyroskop.ChatID, "❌ Fehler beim Schließen des Gyroskops")
 		return
-	}
-
-	// Timer stoppen falls vorhanden
-	if timer, exists := b.timers[gyroskop.ID]; exists {
-		timer.Stop()
-		delete(b.timers, gyroskop.ID)
 	}
 
 	// Aus Cache entfernen
@@ -496,7 +491,7 @@ func (b *Bot) handleCancelOrderCallback(query *tgbotapi.CallbackQuery) {
 // formatCurrentStatus formatiert den aktuellen Status (während Gyroskop läuft)
 func (b *Bot) formatCurrentStatus(gyroskop *database.Gyroskop, orders []database.Order) string {
 	var text strings.Builder
-	
+
 	text.WriteString("📊 *Aktueller Status*\n")
 	text.WriteString(fmt.Sprintf("⏰ Deadline: %s\n\n", gyroskop.Deadline.Format("15:04")))
 
@@ -507,11 +502,11 @@ func (b *Bot) formatCurrentStatus(gyroskop *database.Gyroskop, orders []database
 
 	totalMeat := 0
 	totalVeggie := 0
-	
+
 	for _, order := range orders {
 		name := b.formatUserName(&order)
 		var orderText string
-		
+
 		if order.QuantityMeat > 0 && order.QuantityVeggie > 0 {
 			orderText = fmt.Sprintf("🥩 %d mit Fleisch, 🥬 %d vegetarisch", order.QuantityMeat, order.QuantityVeggie)
 		} else if order.QuantityMeat > 0 {
@@ -527,7 +522,7 @@ func (b *Bot) formatCurrentStatus(gyroskop *database.Gyroskop, orders []database
 				orderText = fmt.Sprintf("🥬 %d vegetarisch", order.QuantityVeggie)
 			}
 		}
-		
+
 		text.WriteString(fmt.Sprintf("• %s: %s\n", name, orderText))
 		totalMeat += order.QuantityMeat
 		totalVeggie += order.QuantityVeggie
@@ -541,7 +536,7 @@ func (b *Bot) formatCurrentStatus(gyroskop *database.Gyroskop, orders []database
 // formatOrderSummary formatiert die finale Bestellübersicht
 func (b *Bot) formatOrderSummary(gyroskop *database.Gyroskop, orders []database.Order) string {
 	var text strings.Builder
-	
+
 	text.WriteString("📊 *Finale Bestellübersicht*\n")
 	text.WriteString(fmt.Sprintf("⏰ Deadline war: %s\n\n", gyroskop.Deadline.Format("15:04")))
 
@@ -552,11 +547,11 @@ func (b *Bot) formatOrderSummary(gyroskop *database.Gyroskop, orders []database.
 
 	totalMeat := 0
 	totalVeggie := 0
-	
+
 	for _, order := range orders {
 		name := b.formatUserName(&order)
 		var orderText string
-		
+
 		if order.QuantityMeat > 0 && order.QuantityVeggie > 0 {
 			orderText = fmt.Sprintf("🥩 %d mit Fleisch, 🥬 %d vegetarisch", order.QuantityMeat, order.QuantityVeggie)
 		} else if order.QuantityMeat > 0 {
@@ -572,7 +567,7 @@ func (b *Bot) formatOrderSummary(gyroskop *database.Gyroskop, orders []database.
 				orderText = fmt.Sprintf("🥬 %d vegetarisch", order.QuantityVeggie)
 			}
 		}
-		
+
 		text.WriteString(fmt.Sprintf("• %s: %s\n", name, orderText))
 		totalMeat += order.QuantityMeat
 		totalVeggie += order.QuantityVeggie
@@ -653,13 +648,13 @@ func (b *Bot) sendMessageWithReactions(chatID int64, text string) *tgbotapi.Mess
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeMarkdown
 	msg.ReplyMarkup = keyboard
-	
+
 	sentMessage, err := b.api.Send(msg)
 	if err != nil {
 		log.Printf("Fehler beim Senden der Nachricht mit Reactions: %v", err)
 		return nil
 	}
-	
+
 	return &sentMessage
 }
 
@@ -679,7 +674,7 @@ func (b *Bot) updateGyroskopMessage(gyroskop *database.Gyroskop, originalMessage
 	if messageID == 0 {
 		messageID = originalMessage.MessageID
 	}
-	
+
 	// Aktuelle Bestellungen laden
 	orders, err := b.db.GetOrdersByGyroskop(gyroskop.ID)
 	if err != nil {
@@ -711,11 +706,11 @@ func (b *Bot) updateGyroskopMessage(gyroskop *database.Gyroskop, originalMessage
 		text += "📋 *Aktuelle Bestellungen:*\n"
 		totalMeat := 0
 		totalVeggie := 0
-		
+
 		for _, order := range orders {
 			name := b.formatUserName(&order)
 			var orderText string
-			
+
 			if order.QuantityMeat > 0 && order.QuantityVeggie > 0 {
 				orderText = fmt.Sprintf("🥩 %d mit Fleisch, 🥬 %d vegetarisch", order.QuantityMeat, order.QuantityVeggie)
 			} else if order.QuantityMeat > 0 {
@@ -731,12 +726,12 @@ func (b *Bot) updateGyroskopMessage(gyroskop *database.Gyroskop, originalMessage
 					orderText = fmt.Sprintf("🥬 %d vegetarisch", order.QuantityVeggie)
 				}
 			}
-			
+
 			text += fmt.Sprintf("• %s: %s\n", name, orderText)
 			totalMeat += order.QuantityMeat
 			totalVeggie += order.QuantityVeggie
 		}
-		
+
 		totalGyros := totalMeat + totalVeggie
 		text += fmt.Sprintf("\n🥙 *Aktuell: %d Gyros* (🥩 %d mit Fleisch, 🥬 %d vegetarisch)\n\n", totalGyros, totalMeat, totalVeggie)
 	} else {
@@ -804,14 +799,63 @@ func (b *Bot) loadActiveGyroskops() {
 
 		// In Cache laden
 		b.activeGyroskops[gyroskop.ChatID] = &gyroskop
-
-		// Start timer for automatic closing
-		duration := time.Until(gyroskop.Deadline)
-		timer := time.AfterFunc(duration, func() {
-			b.autoCloseGyroskop(&gyroskop)
-		})
-		b.timers[gyroskop.ID] = timer
 	}
 
 	log.Printf("Bot started - %d active gyroskops loaded", len(b.activeGyroskops))
+}
+
+// backgroundExpiryChecker runs in a background goroutine and checks for expired gyroskops every minute
+func (b *Bot) backgroundExpiryChecker() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	log.Println("Background expiry checker started")
+
+	for {
+		select {
+		case <-b.stopChan:
+			log.Println("Background expiry checker stopping...")
+			return
+		case <-ticker.C:
+			b.checkExpiredGyroskops()
+		}
+	}
+}
+
+// checkExpiredGyroskops checks for and closes any expired gyroskops
+func (b *Bot) checkExpiredGyroskops() {
+	now := time.Now()
+
+	// Check all active gyroskops in cache
+	for chatID, gyroskop := range b.activeGyroskops {
+		if gyroskop.Deadline.Before(now) {
+			log.Printf("Found expired gyroskop %d in chat %d, closing...", gyroskop.ID, chatID)
+			go b.autoCloseGyroskop(gyroskop)
+		}
+	}
+
+	// Also check database directly in case cache is out of sync
+	gyroskops, err := b.db.GetAllActiveGyroskops()
+	if err != nil {
+		log.Printf("Error checking active gyroskops from database: %v", err)
+		return
+	}
+
+	for _, gyroskop := range gyroskops {
+		if gyroskop.Deadline.Before(now) {
+			// Check if we already have this in cache (to avoid double processing)
+			if cachedGyroskop, exists := b.activeGyroskops[gyroskop.ChatID]; exists && cachedGyroskop.ID == gyroskop.ID {
+				// Already handled above
+				continue
+			}
+
+			log.Printf("Found expired gyroskop %d in database (not in cache), closing...", gyroskop.ID)
+			go b.autoCloseGyroskop(&gyroskop)
+		}
+	}
+}
+
+// Stop gracefully stops the bot
+func (b *Bot) Stop() {
+	close(b.stopChan)
 }

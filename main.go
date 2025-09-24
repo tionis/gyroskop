@@ -3,6 +3,8 @@ package main
 import (
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/tionis/gyroskop/internal/bot"
 	"github.com/tionis/gyroskop/internal/database"
@@ -28,5 +30,15 @@ func main() {
 		log.Fatalf("Error creating bot: %v", err)
 	}
 
-	bot.Run()
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start bot in a goroutine
+	go bot.Run()
+
+	// Wait for shutdown signal
+	<-sigChan
+	log.Println("Shutdown signal received, stopping bot...")
+	bot.Stop()
 }
