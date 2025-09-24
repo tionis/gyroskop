@@ -105,8 +105,8 @@ func (b *Bot) handleHelp(message *tgbotapi.Message) {
 /gyroskop - Neues Gyroskop für 15 Minuten öffnen
 /gyroskop HH:MM - Neues Gyroskop bis zur angegebenen Uhrzeit öffnen
 /gyroskop 30min - Neues Gyroskop für 30 Minuten öffnen
-/gyroskop (als Antwort) - Gyroskop wiedereröffnen für 15 Minuten
-/gyroskop HH:MM (als Antwort) - Gyroskop mit neuer Deadline wiedereröffnen
+/gyroskop (als Antwort) - Gyroskop wiedereröffnen oder Deadline ändern (15min)
+/gyroskop HH:MM (als Antwort) - Gyroskop wiedereröffnen oder Deadline ändern
 /status - Aktuellen Status anzeigen
 /ende - Gyroskop beenden (nur als Antwort auf Gyroskop-Nachricht)
 /stornieren - Eigene Bestellung stornieren
@@ -162,7 +162,7 @@ func (b *Bot) handleNewGyroskop(message *tgbotapi.Message, args string) {
 	b.sendGyroskopMessage(message.Chat.ID, gyroskop, "🥙 *Gyroskop geöffnet!*", message.From)
 }
 
-// handleReopenGyroskop reopens a closed gyroskop
+// handleReopenGyroskop reopens a closed gyroskop or updates deadline of an active one
 func (b *Bot) handleReopenGyroskop(message *tgbotapi.Message, args string) {
 	// Check if user is the creator by checking the replied message
 	replyMessage := message.ReplyToMessage
@@ -176,15 +176,7 @@ func (b *Bot) handleReopenGyroskop(message *tgbotapi.Message, args string) {
 
 	// Check if user is the creator
 	if gyroskop.CreatedBy != int64(message.From.ID) {
-		b.sendMessage(message.Chat.ID, "⚠️ Nur der Ersteller kann das Gyroskop wiedereröffnen!")
-		return
-	}
-
-	// Check if there's already an active gyroskop
-	if existingGyroskop, exists := b.activeGyroskops[message.Chat.ID]; exists {
-		berlin, _ := time.LoadLocation("Europe/Berlin")
-		deadlineInBerlin := existingGyroskop.Deadline.In(berlin)
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("⚠️ Es gibt bereits ein aktives Gyroskop bis %s. Beende es zuerst.", deadlineInBerlin.Format("15:04")))
+		b.sendMessage(message.Chat.ID, "⚠️ Nur der Ersteller kann das Gyroskop bearbeiten!")
 		return
 	}
 
@@ -195,7 +187,38 @@ func (b *Bot) handleReopenGyroskop(message *tgbotapi.Message, args string) {
 		return
 	}
 
-	// Reopen the gyroskop
+	// Check if this is the currently active gyroskop
+	if existingGyroskop, exists := b.activeGyroskops[message.Chat.ID]; exists && existingGyroskop.ID == gyroskop.ID {
+		// Update deadline of active gyroskop
+		err = b.db.UpdateGyroskopDeadline(gyroskop.ID, deadline)
+		if err != nil {
+			log.Printf("Fehler beim Aktualisieren der Deadline: %v", err)
+			b.sendMessage(message.Chat.ID, "❌ Fehler beim Aktualisieren der Deadline")
+			return
+		}
+
+		// Update cache
+		existingGyroskop.Deadline = deadline
+
+		berlin, _ := time.LoadLocation("Europe/Berlin")
+		deadlineInBerlin := deadline.In(berlin)
+
+		b.sendMessage(message.Chat.ID, fmt.Sprintf("⏰ *Deadline aktualisiert!*\n\nNeue Deadline: %s Uhr", deadlineInBerlin.Format("15:04")))
+
+		// Update the gyroskop message with new deadline
+		b.updateGyroskopMessage(existingGyroskop, replyMessage)
+		return
+	}
+
+	// Check if there's a different active gyroskop
+	if existingGyroskop, exists := b.activeGyroskops[message.Chat.ID]; exists && existingGyroskop.ID != gyroskop.ID {
+		berlin, _ := time.LoadLocation("Europe/Berlin")
+		deadlineInBerlin := existingGyroskop.Deadline.In(berlin)
+		b.sendMessage(message.Chat.ID, fmt.Sprintf("⚠️ Es gibt bereits ein anderes aktives Gyroskop bis %s. Beende es zuerst.", deadlineInBerlin.Format("15:04")))
+		return
+	}
+
+	// This is a closed gyroskop, reopen it
 	err = b.db.ReopenGyroskop(gyroskop.ID, deadline)
 	if err != nil {
 		log.Printf("Fehler beim Wiedereröffnen des Gyroskops: %v", err)

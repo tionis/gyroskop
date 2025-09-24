@@ -288,3 +288,12 @@ func (db *DB) ReopenGyroskop(gyroskopID int, deadline time.Time) error {
 	)
 	return err
 }
+
+// UpdateGyroskopDeadline updates the deadline of an active gyroskop
+func (db *DB) UpdateGyroskopDeadline(gyroskopID int, deadline time.Time) error {
+	_, err := db.Exec(`
+		UPDATE gyroskops SET deadline = $1 WHERE id = $2`,
+		deadline, gyroskopID,
+	)
+	return err
+}
