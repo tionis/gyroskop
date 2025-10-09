@@ -1,155 +1,197 @@
-# 🥙 Gyroskop Bot
+# Gyroskop Bot
 
 [![Build and Push Docker Image](https://github.com/tionis/gyroskop/actions/workflows/docker-build.yml/badge.svg)](https://github.com/tionis/gyroskop/actions/workflows/docker-build.yml)
 [![Test](https://github.com/tionis/gyroskop/actions/workflows/test.yml/badge.svg)](https://github.com/tionis/gyroskop/actions/workflows/test.yml)
 
-A Telegram bot for coordinating gyros orders in groups.
+A Telegram bot for coordinating food orders in groups with time-based ordering.
 
 ## Features
 
-- 🕐 **Time-based Orders**: Open a "Gyroskop" with a deadline
-- 🥩🥬 **Two Gyros Types**: Support for meat and vegetarian gyros
-- 👥 **Group-based**: Only works in Telegram groups  
-- 📊 **Automatic Overview**: Final order overview posted at deadline
-- 🎯 **Reaction Buttons**: Easy ordering with inline buttons
-- � **PostgreSQL Storage**: Reliable database storage
-- 🔒 **Reply-based**: Commands work as replies to messages
-- 🚫 **Clean Interface**: No confusing IDs shown to users
+- Time-based ordering with configurable deadlines
+- Custom food types with arbitrary options (Pizza, Gyros, Burger, etc.)
+- Fuzzy matching for natural language orders
+- Inline button support for quick ordering
+- PostgreSQL storage
+- Group-only operation
+- Automatic summary at deadline
 
-## Quick Start
+## Usage
 
-### Using Docker (Recommended)
+### Command Format
+
+Commands use comma-separated syntax:
+```
+/gyroskop [time], [name], option1, option2, ...
+```
+
+All parameters are optional. Time and name must be separated by commas.
+
+### Creating Orders
+
+```
+/gyroskop                                    # Default: Gyros for 15min
+/gyroskop 30min                              # Custom duration
+/gyroskop 17:00                              # Until specific time (Berlin timezone)
+/gyroskop Pizza, Margherita, Salami          # Custom food type
+/gyroskop 17:00, Burger, Beef, Chicken       # Full customization
+/gyroskop 10min, Döner, Fleisch, Vegetarisch # 10 minutes with custom options
+```
+
+Time formats supported:
+- Duration: `30min`, `1h`, `2h`, `45min`
+- Absolute time: `17:00`, `12:30` (HH:MM in Berlin timezone)
+- Default: 15 minutes if not specified
+
+### Placing Orders
+
+Place orders via text with fuzzy matching:
+```
+2 fleisch              # Orders 2x Fleisch
+3 veggie               # Orders 3x Vegetarisch
+2 meat, 3 veggie       # Multiple items in one line
+2 fl                   # Prefix matching works
+```
+
+Or use inline buttons for quantities 1-5.
+
+### Other Commands
+
+```
+/status                           # Show current orders
+/ende                             # Close order early (creator only)
+/stornieren                       # Cancel your order
+/gyroskop (as reply)              # Reopen or modify existing order
+```
+
+### Reply-Based Actions
+
+- `/ende` as reply to gyroskop message: Close that specific order
+- `/gyroskop [args]` as reply: Reopen closed order or change options
+
+## Installation
+
+### Prerequisites
+
+1. **Telegram Bot Token**: Create a bot via [@BotFather](https://t.me/botfather) on Telegram
+2. **PostgreSQL Database**: Version 12 or higher
+
+### Docker
 
 ```bash
-# Pull the latest image
 docker pull ghcr.io/tionis/gyroskop:latest
 
-# Run with your bot token and database configuration
 docker run -d \
   --name gyroskop-bot \
-  -e TELEGRAM_BOT_TOKEN=your_token_here \
-  -e DB_HOST=your_postgres_host \
-  -e DB_PORT=5432 \
-  -e DB_NAME=gyroskop \
-  -e DB_USER=gyroskop \
-  -e DB_PASSWORD=your_password \
-  -e DB_SSLMODE=require \
+  -e TELEGRAM_BOT_TOKEN=your_token \
+  -e POSTGRES_HOST=your_postgres_host \
+  -e POSTGRES_PORT=5432 \
+  -e POSTGRES_DB=gyroskop \
+  -e POSTGRES_USER=gyroskop \
+  -e POSTGRES_PASSWORD=your_password \
+  -e POSTGRES_SSLMODE=require \
   ghcr.io/tionis/gyroskop:latest
 ```
 
-### Using Docker Compose
+### Docker Compose
 
-1. Copy the example environment file:
 ```bash
+# Copy example environment file
 cp .env.example .env
-```
 
-2. Edit `.env` and configure your settings:
-```bash
-TELEGRAM_BOT_TOKEN=your_token_here
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=gyroskop
-DB_USER=gyroskop
-DB_PASSWORD=your_secure_password
-DB_SSLMODE=disable
-```
+# Edit .env with your configuration
+# - Get bot token from @BotFather
+# - Configure PostgreSQL settings
 
-3. Start the bot and PostgreSQL:
-```bash
+# Start bot and database
 docker-compose up -d
 ```
 
-### Build from Source
+### From Source
 
 ```bash
-# Clone the repository
 git clone https://github.com/tionis/gyroskop.git
 cd gyroskop
 
-# Set up PostgreSQL database (create database and user)
-# createdb -U postgres gyroskop
-# createuser -U postgres gyroskop
-
 # Set environment variables
-export TELEGRAM_BOT_TOKEN=your_token_here
-export DB_HOST=localhost
-export DB_PORT=5432
-export DB_NAME=gyroskop
-export DB_USER=gyroskop
-export DB_PASSWORD=your_password
-export DB_SSLMODE=require
+export TELEGRAM_BOT_TOKEN=your_token
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=5432
+export POSTGRES_DB=gyroskop
+export POSTGRES_USER=gyroskop
+export POSTGRES_PASSWORD=your_password
+export POSTGRES_SSLMODE=disable
 
-# Build the binary
+# Build and run
 go build -o gyroskop-bot ./main.go
-
-# Run the bot
 ./gyroskop-bot
 ```
 
 ## Configuration
 
-The bot uses the following environment variables:
+Environment variables:
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `TELEGRAM_BOT_TOKEN` | Your Telegram bot token | Yes | - |
-| `DB_HOST` | PostgreSQL host | No | `localhost` |
-| `DB_PORT` | PostgreSQL port | No | `5432` |
-| `DB_NAME` | Database name | No | `gyroskop` |
-| `DB_USER` | Database user | No | `gyroskop` |
-| `DB_PASSWORD` | Database password | No | `gyroskop` |
-| `DB_SSLMODE` | SSL mode (disable/require/verify-ca/verify-full) | No | `require` |
-
-## Usage
-
-1. Add the bot to your Telegram group
-2. Use `/gyroskop HH:MM` to start a new gyros order (e.g., `/gyroskop 12:30`)
-3. Users can order using the inline buttons:
-   - 🥩 **Mit Fleisch**: Buttons for meat gyros (1-5)
-   - 🥬 **Vegetarisch**: Buttons for vegetarian gyros (1-5)
-4. Use `/status` to see current orders
-5. Reply to the gyroskop message with `/ende` to close early
-6. The bot automatically closes and shows final summary at deadline
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Yes | - | Telegram bot token |
+| `POSTGRES_HOST` | No | `localhost` | PostgreSQL host |
+| `POSTGRES_PORT` | No | `5432` | PostgreSQL port |
+| `POSTGRES_DB` | No | `gyroskop` | Database name |
+| `POSTGRES_USER` | No | `gyroskop` | Database user |
+| `POSTGRES_PASSWORD` | No | `gyroskop` | Database password |
+| `POSTGRES_SSLMODE` | No | `disable` | SSL mode (disable/require/verify-ca/verify-full) |
 
 ## Development
 
-### Prerequisites
+Requirements:
+- Go 1.21+
+- PostgreSQL 12+
 
-- Go 1.21 or higher
-- PostgreSQL 12 or higher
+### Database Setup
+
+Option 1 - Using provided script:
+```bash
+sudo -u postgres psql -f setup.sql
+```
+
+Option 2 - Manual setup:
+```bash
+sudo -u postgres createdb gyroskop
+sudo -u postgres createuser gyroskop
+sudo -u postgres psql -c "ALTER USER gyroskop PASSWORD 'your_password';"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE gyroskop TO gyroskop;"
+```
+
+Tables are created automatically by the bot on first run.
 
 ### Running Tests
 
 ```bash
+# Run all tests
 go test ./...
+
+# Run with verbose output
+go test ./... -v
+
+# Run specific package tests
+go test ./internal/bot/... -v
 ```
 
 ### Local Development
 
-1. Set up a local PostgreSQL database:
 ```bash
-# Option 1: Using the provided setup script
-sudo -u postgres psql -f setup.sql
+# Set environment variables
+export TELEGRAM_BOT_TOKEN=your_token
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=5432
+export POSTGRES_DB=gyroskop
+export POSTGRES_USER=gyroskop
+export POSTGRES_PASSWORD=your_password
+export POSTGRES_SSLMODE=disable
 
-# Option 2: Manual setup
-sudo -u postgres createdb gyroskop
-sudo -u postgres createuser gyroskop
-# Then set password in PostgreSQL: ALTER USER gyroskop PASSWORD 'your_password';
-```
-
-2. Set environment variables:
-```bash
-export TELEGRAM_BOT_TOKEN=your_token_here
-export DB_HOST=localhost
-export DB_PORT=5432
-export DB_NAME=gyroskop
-export DB_USER=gyroskop
-export DB_PASSWORD=your_password
-export DB_SSLMODE=disable
-```
-
-3. Run the bot:
-```bash
+# Run the bot
 go run main.go
 ```
+
+## License
+
+See LICENSE file.

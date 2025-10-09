@@ -99,34 +99,39 @@ func (b *Bot) handleCommand(message *tgbotapi.Message) {
 
 // handleHelp sends the help message
 func (b *Bot) handleHelp(message *tgbotapi.Message) {
-	helpText := `🥙 *Gyroskop Bot - Gyros Bestellungen koordinieren*
+	helpText := `🥙 *Gyroskop Bot - Essensbestellungen koordinieren*
 
 *Befehle:*
-/gyroskop - Neues Gyroskop für 15 Minuten öffnen
+/gyroskop - Neues Gyroskop für 15 Minuten öffnen (Standard: Gyros mit Fleisch und Vegetarisch)
 /gyroskop HH:MM - Neues Gyroskop bis zur angegebenen Uhrzeit öffnen
 /gyroskop 30min - Neues Gyroskop für 30 Minuten öffnen
-/gyroskop (als Antwort) - Gyroskop wiedereröffnen oder Deadline ändern (15min)
-/gyroskop HH:MM (als Antwort) - Gyroskop wiedereröffnen oder Deadline ändern
+/gyroskop Pizza, Margherita, Salami, Hawaii - Pizza-Gyroskop mit eigenen Optionen
+/gyroskop 17:00, Burger, Beef, Chicken, Veggie - Burger-Gyroskop bis 17:00 Uhr
+/gyroskop 10min, Döner, Fleisch, Vegetarisch, Dürüm - Döner-Gyroskop für 10min mit 3 Optionen
+/gyroskop (als Antwort) - Gyroskop wiedereröffnen oder Optionen ändern
 /status - Aktuellen Status anzeigen
 /ende - Gyroskop beenden (nur Ersteller)
 /stornieren - Eigene Bestellung stornieren
 /help - Diese Hilfe anzeigen
 
+*Format:* /gyroskop [Zeit], [Name], Option1, Option2, ...
+  ⚠️ Wichtig: Komma-getrennt! Zeit und Name müssen durch Komma getrennt sein.
+
 *Bestellen:*
-🥩 *Mit Fleisch:* Nutze die Buttons 1️⃣-5️⃣ unter "Mit Fleisch"
-🥬 *Vegetarisch:* Nutze die Buttons 1️⃣-5️⃣ unter "Vegetarisch"
-💬 *Text:* Schreibe "2f" (2 mit Fleisch), "3v" (3 vegetarisch), "1f2v" (1 Fleisch + 2 vegetarisch)
+📱 *Buttons:* Nutze die Buttons 1️⃣-5️⃣ unter jeder Option
+💬 *Text:* Schreibe einfach die Anzahl und Option (z.B. "2 fleisch" oder "3 veggie")
+   - Eine Zeile pro Option, oder alles in einer Zeile
+   - Fuzzy Matching: "fleisch", "meat", "fl" funktionieren alle
 ❌ *Stornieren:* Schreibe "0" oder nutze den ❌ Stornieren Button
 
 *Beispiele:*
-/gyroskop - Öffnet Gyroskop für 15 Minuten
-/gyroskop 17:00 - Öffnet Gyroskop bis 17:00 Uhr
-/gyroskop 45min - Öffnet Gyroskop für 45 Minuten
-🥩 2️⃣ Button - Bestellt 2 Gyros mit Fleisch
-🥬 1️⃣ Button - Bestellt 1 vegetarisches Gyros
-2f - Bestellt 2 Gyros mit Fleisch
-3v - Bestellt 3 vegetarische Gyros
-1f2v - Bestellt 1 Gyros mit Fleisch und 2 vegetarische
+/gyroskop - Standard Gyros für 15min
+/gyroskop 30min - Gyros für 30min
+/gyroskop Pizza, Margherita, Salami - Pizza-Gyroskop mit 3 Optionen
+/gyroskop 10min, Döner, Fleisch, Vegetarisch - Döner für 10min mit 2 Optionen
+2 fleisch - Bestellt 2x Fleisch
+3 veggie - Bestellt 3x Vegetarisch
+2 meat, 3 veggie - Bestellt 2x Fleisch und 3x Vegetarisch (mehrere in einer Zeile)
 0 - Storniert die komplette Bestellung`
 
 	b.sendMessage(message.Chat.ID, helpText)
@@ -148,15 +153,15 @@ func (b *Bot) handleNewGyroskop(message *tgbotapi.Message, args string) {
 		return
 	}
 
-	// Parse deadline from args or use default (15 minutes)
-	deadline, err := b.parseDeadline(args)
+	// Parse deadline and food options from args
+	deadline, name, foodOptions, err := b.parseGyroskopArgs(args)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, "⚠️ Ungültiges Zeitformat. Verwende HH:MM (z.B. 17:00) oder Dauer (z.B. 30min)")
+		b.sendMessage(message.Chat.ID, "⚠️ Ungültiges Format. Verwende: /gyroskop [Zeit], Name, Option1, Option2, ...")
 		return
 	}
 
 	// Create new gyroskop
-	gyroskop, err := b.db.CreateGyroskop(message.Chat.ID, int64(message.From.ID), deadline)
+	gyroskop, err := b.db.CreateGyroskop(message.Chat.ID, int64(message.From.ID), name, foodOptions, deadline)
 	if err != nil {
 		log.Printf("Fehler beim Erstellen des Gyroskops: %v", err)
 		b.sendMessage(message.Chat.ID, "❌ Fehler beim Erstellen des Gyroskops")
@@ -166,7 +171,7 @@ func (b *Bot) handleNewGyroskop(message *tgbotapi.Message, args string) {
 	b.sendGyroskopMessage(message.Chat.ID, gyroskop, "🥙 *Gyroskop geöffnet!*", message.From)
 }
 
-// handleReopenGyroskop reopens a closed gyroskop or updates deadline of an active one
+// handleReopenGyroskop reopens a closed gyroskop or updates deadline/options of an active one
 func (b *Bot) handleReopenGyroskop(message *tgbotapi.Message, args string) {
 	// Check if user is the creator by checking the replied message
 	replyMessage := message.ReplyToMessage
@@ -184,10 +189,10 @@ func (b *Bot) handleReopenGyroskop(message *tgbotapi.Message, args string) {
 		return
 	}
 
-	// Parse new deadline or use default (15 minutes)
-	deadline, err := b.parseDeadline(args)
+	// Parse new deadline and options
+	deadline, name, foodOptions, err := b.parseGyroskopArgs(args)
 	if err != nil {
-		b.sendMessage(message.Chat.ID, "⚠️ Ungültiges Zeitformat. Verwende HH:MM (z.B. 17:00) oder Dauer (z.B. 30min)")
+		b.sendMessage(message.Chat.ID, "⚠️ Ungültiges Format. Verwende: /gyroskop [Zeit], Name, Option1, Option2, ...")
 		return
 	}
 
@@ -201,13 +206,25 @@ func (b *Bot) handleReopenGyroskop(message *tgbotapi.Message, args string) {
 			return
 		}
 
+		// Update name and options if provided
+		if args != "" {
+			err = b.db.UpdateGyroskopOptions(gyroskop.ID, name, foodOptions)
+			if err != nil {
+				log.Printf("Fehler beim Aktualisieren der Optionen: %v", err)
+				b.sendMessage(message.Chat.ID, "❌ Fehler beim Aktualisieren der Optionen")
+				return
+			}
+		}
+
 		// Update cache
 		existingGyroskop.Deadline = deadline
+		existingGyroskop.Name = name
+		existingGyroskop.FoodOptions = foodOptions
 
 		berlin, _ := time.LoadLocation("Europe/Berlin")
 		deadlineInBerlin := deadline.In(berlin)
 
-		b.sendMessage(message.Chat.ID, fmt.Sprintf("⏰ *Deadline aktualisiert!*\n\nNeue Deadline: %s Uhr", deadlineInBerlin.Format("15:04")))
+		b.sendMessage(message.Chat.ID, fmt.Sprintf("⏰ *Aktualisiert!*\n\nName: %s\nDeadline: %s Uhr\nOptionen: %s", name, deadlineInBerlin.Format("15:04"), strings.Join(foodOptions, ", ")))
 
 		// Update the gyroskop message with new deadline
 		b.updateGyroskopMessage(existingGyroskop, replyMessage)
@@ -232,6 +249,8 @@ func (b *Bot) handleReopenGyroskop(message *tgbotapi.Message, args string) {
 
 	// Update gyroskop data
 	gyroskop.Deadline = deadline
+	gyroskop.Name = name
+	gyroskop.FoodOptions = foodOptions
 	gyroskop.IsOpen = true
 
 	b.sendGyroskopMessage(message.Chat.ID, gyroskop, "🔄 *Gyroskop wiedereröffnet!*", message.From)
@@ -245,22 +264,28 @@ func (b *Bot) sendGyroskopMessage(chatID int64, gyroskop *database.Gyroskop, tit
 	berlin, _ := time.LoadLocation("Europe/Berlin")
 	deadlineInBerlin := gyroskop.Deadline.In(berlin)
 
+	// Generate example orders
+	var examples []string
+	for _, option := range gyroskop.FoodOptions {
+		examples = append(examples, fmt.Sprintf("'2 %s'", strings.ToLower(option)))
+	}
+
 	text := fmt.Sprintf("%s\n\n"+
 		"👤 Erstellt von: %s\n"+
 		"⏰ Deadline: %s Uhr\n\n"+
-		"Zum Bestellen schreibt '2f' (Fleisch), '3v' (vegetarisch), '1f2v' (gemischt)!\n"+
-		"Oder nutzt die Buttons unten.\n\n"+
+		"Zum Bestellen schreibt %s oder nutzt die Buttons unten.\n\n"+
 		"Zum Beenden: /ende",
 		title,
 		userName,
 		deadlineInBerlin.Format("15:04"),
+		strings.Join(examples, ", "),
 	)
 
 	// Add gyroskop to cache
 	b.activeGyroskops[chatID] = gyroskop
 
 	// Send message with reaction buttons and save message ID
-	sentMessage := b.sendMessageWithReactions(chatID, text)
+	sentMessage := b.sendMessageWithReactions(chatID, text, gyroskop.FoodOptions)
 	if sentMessage != nil {
 		// Update message ID in database
 		err := b.db.UpdateGyroskopMessageID(gyroskop.ID, sentMessage.MessageID)
@@ -372,26 +397,32 @@ func (b *Bot) handleTextMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	// Parse order syntax: "2f", "3v", "1f2v", etc.
-	meatQuantity, veggieQuantity, err := b.parseOrderText(text)
-	if err != nil {
+	// Parse order syntax using shortcodes generated from food options
+	quantities := b.parseOrderText(text, gyroskop.FoodOptions)
+	if quantities == nil {
 		return // Ignore invalid formats
 	}
 
-	// If both are 0, ignore
-	if meatQuantity == 0 && veggieQuantity == 0 {
+	// Check if all quantities are 0
+	hasQuantity := false
+	for _, qty := range quantities {
+		if qty > 0 {
+			hasQuantity = true
+			break
+		}
+	}
+	if !hasQuantity {
 		return
 	}
 
 	// Add or update order
-	err = b.db.AddOrUpdateOrder(
+	err := b.db.AddOrUpdateOrder(
 		gyroskop.ID,
 		int64(message.From.ID),
 		message.From.UserName,
 		message.From.FirstName,
 		message.From.LastName,
-		meatQuantity,
-		veggieQuantity,
+		quantities,
 	)
 	if err != nil {
 		log.Printf("Error adding order: %v", err)
@@ -400,59 +431,87 @@ func (b *Bot) handleTextMessage(message *tgbotapi.Message) {
 	}
 
 	// Format response message
-	var orderText string
-	if meatQuantity > 0 && veggieQuantity > 0 {
-		orderText = fmt.Sprintf("🥩 %d mit Fleisch, 🥬 %d vegetarisch", meatQuantity, veggieQuantity)
-	} else if meatQuantity > 0 {
-		if meatQuantity == 1 {
-			orderText = "🥩 1 mit Fleisch"
-		} else {
-			orderText = fmt.Sprintf("🥩 %d mit Fleisch", meatQuantity)
-		}
-	} else if veggieQuantity > 0 {
-		if veggieQuantity == 1 {
-			orderText = "🥬 1 vegetarisch"
-		} else {
-			orderText = fmt.Sprintf("🥬 %d vegetarisch", veggieQuantity)
-		}
-	}
-
+	orderText := b.formatOrderQuantities(quantities, gyroskop.FoodOptions)
 	b.sendMessage(message.Chat.ID, fmt.Sprintf("✅ %s: %s", userName, orderText))
 
 	// Update the gyroskop message with current orders
 	b.updateGyroskopMessage(gyroskop, message)
 }
 
-// parseOrderText parses order text like "2f", "3v", "1f2v" and returns meat and veggie quantities
-func (b *Bot) parseOrderText(text string) (int, int, error) {
-	// Use regex to parse orders like "2f", "3v", "1f2v"
-	orderRegex := regexp.MustCompile(`^(?:(\d+)f)?(?:(\d+)v)?$`)
-	matches := orderRegex.FindStringSubmatch(text)
+// parseOrderText parses order text using fuzzy matching
+// Supports formats like:
+//
+//	"2 fleisch" - single order
+//	"2 fleisch, 3 veggie" - multiple orders in one line (comma separated)
+//	"2 meat\n3 veggie" - multiple orders on separate lines
+//
+// Returns map of food option to quantity, or nil if invalid format
+func (b *Bot) parseOrderText(text string, foodOptions []string) map[string]int {
+	quantities := make(map[string]int)
 
-	if len(matches) == 0 {
-		return 0, 0, fmt.Errorf("invalid format")
+	// Split by newlines and commas to handle both formats
+	lines := strings.Split(text, "\n")
+	var parts []string
+	for _, line := range lines {
+		lineParts := strings.Split(line, ",")
+		parts = append(parts, lineParts...)
 	}
 
-	var meatQuantity, veggieQuantity int
-	var err error
+	// Pattern to match: number followed by text
+	// Examples: "2 fleisch", "3meat", "1 veggie"
+	orderRegex := regexp.MustCompile(`^\s*(\d+)\s*(.+?)\s*$`)
 
-	// Parse meat quantity
-	if matches[1] != "" {
-		meatQuantity, err = strconv.Atoi(matches[1])
-		if err != nil || meatQuantity < 0 || meatQuantity > 10 {
-			return 0, 0, fmt.Errorf("invalid meat quantity")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		matches := orderRegex.FindStringSubmatch(part)
+		if len(matches) != 3 {
+			continue // Invalid format for this part, skip it
+		}
+
+		quantity, err := strconv.Atoi(matches[1])
+		if err != nil || quantity < 0 || quantity > 10 {
+			continue // Invalid quantity, skip it
+		}
+
+		optionText := strings.TrimSpace(matches[2])
+
+		// Use fuzzy matching to find the option
+		matchedOption, found := database.FuzzyMatchOption(optionText, foodOptions)
+		if !found {
+			continue // No match found, skip it
+		}
+
+		// Add to quantities (if already exists, overwrite)
+		quantities[matchedOption] = quantity
+	}
+
+	// If we didn't parse any valid orders, return nil
+	if len(quantities) == 0 {
+		return nil
+	}
+
+	return quantities
+}
+
+// formatOrderQuantities formats quantities map into a readable string
+func (b *Bot) formatOrderQuantities(quantities map[string]int, foodOptions []string) string {
+	var parts []string
+
+	for _, option := range foodOptions {
+		if qty, ok := quantities[option]; ok && qty > 0 {
+			if qty == 1 {
+				parts = append(parts, fmt.Sprintf("1 %s", option))
+			} else {
+				parts = append(parts, fmt.Sprintf("%d %s", qty, option))
+			}
 		}
 	}
 
-	// Parse veggie quantity
-	if matches[2] != "" {
-		veggieQuantity, err = strconv.Atoi(matches[2])
-		if err != nil || veggieQuantity < 0 || veggieQuantity > 10 {
-			return 0, 0, fmt.Errorf("invalid veggie quantity")
-		}
-	}
-
-	return meatQuantity, veggieQuantity, nil
+	return strings.Join(parts, ", ")
 }
 
 // parseDeadline parses a deadline from various formats or returns default (15 minutes from now)
@@ -523,6 +582,70 @@ func (b *Bot) parseDeadline(input string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("invalid format")
 }
 
+// parseGyroskopArgs parses the gyroskop command arguments
+// Format (comma-separated): [time], [name], option1, option2, ...
+// Examples:
+//
+//	/gyroskop -> default (15min, "Gyros", ["Fleisch", "Vegetarisch"])
+//	/gyroskop 17:00 -> until 17:00, default name and options
+//	/gyroskop Pizza, Margherita, Salami, Hawaii -> default time (15min), Pizza with 3 options
+//	/gyroskop 30min, Burger, Beef, Chicken, Veggie -> 30min, Burger with 3 options
+//	/gyroskop 10min, Döner, Fleisch, Vegetarisch, Dürüm -> 10min, Döner with 3 options
+func (b *Bot) parseGyroskopArgs(args string) (time.Time, string, []string, error) {
+	args = strings.TrimSpace(args)
+
+	// Default values
+	name := "Gyros"
+	foodOptions := []string{"Fleisch", "Vegetarisch"}
+	deadline := time.Now().Add(15 * time.Minute)
+
+	// If no args, return defaults
+	if args == "" {
+		return deadline, name, foodOptions, nil
+	}
+
+	// Split by comma
+	parts := strings.Split(args, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+
+	// Try to parse first part as deadline
+	firstPartDeadline, err := b.parseDeadline(parts[0])
+	startIdx := 0
+	if err == nil {
+		// First part is a deadline
+		deadline = firstPartDeadline
+		startIdx = 1
+	}
+
+	// If we have remaining parts, parse them as name and food options
+	if len(parts) > startIdx {
+		// Next part is the name
+		if len(parts) > startIdx && parts[startIdx] != "" {
+			name = parts[startIdx]
+			startIdx++
+		}
+
+		// Remaining parts are food options
+		if len(parts) > startIdx {
+			foodOptions = parts[startIdx:]
+			// Filter out empty strings
+			filtered := make([]string, 0, len(foodOptions))
+			for _, opt := range foodOptions {
+				if opt != "" {
+					filtered = append(filtered, opt)
+				}
+			}
+			if len(filtered) > 0 {
+				foodOptions = filtered
+			}
+		}
+	}
+
+	return deadline, name, foodOptions, nil
+}
+
 // handleEndGyroskop ends the gyroskop created by the user
 func (b *Bot) handleEndGyroskop(message *tgbotapi.Message) {
 	gyroskop, exists := b.activeGyroskops[message.Chat.ID]
@@ -573,24 +696,37 @@ func (b *Bot) closeGyroskop(gyroskop *database.Gyroskop) {
 func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 	// Parse Callback Data
 	data := query.Data
-	if len(data) < 2 || data[0] != 'g' {
+	if !strings.HasPrefix(data, "g") {
+		b.answerCallbackQuery(query.ID, "❌ Ungültige Callback-Daten")
 		return
 	}
 
-	// Format: gXY wobei X=Art (m=meat, v=veggie) und Y=Anzahl
-	// oder g0 für stornieren
-	if data == "g0" {
+	// Format: g<optionIndex>_<quantity>
+	// Example: g0_2 means option 0, quantity 2
+	parts := strings.TrimPrefix(data, "g")
+
+	// Special case: g0 means cancel
+	if parts == "0" {
 		b.handleCancelOrderCallback(query)
 		return
 	}
 
-	if len(data) < 3 {
+	// Parse format: <index>_<quantity>
+	splitParts := strings.Split(parts, "_")
+	if len(splitParts) != 2 {
+		b.answerCallbackQuery(query.ID, "❌ Ungültiges Format")
 		return
 	}
 
-	gyrosType := data[1] // 'm' für Fleisch, 'v' für vegetarisch
-	quantity, err := strconv.Atoi(data[2:])
+	optionIndex, err := strconv.Atoi(splitParts[0])
 	if err != nil {
+		b.answerCallbackQuery(query.ID, "❌ Ungültiger Index")
+		return
+	}
+
+	quantity, err := strconv.Atoi(splitParts[1])
+	if err != nil || quantity < 0 || quantity > 10 {
+		b.answerCallbackQuery(query.ID, "❌ Ungültige Anzahl")
 		return
 	}
 
@@ -601,66 +737,49 @@ func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 	}
 
 	// Check if the gyroskop is still open
-	if time.Now().After(gyroskop.Deadline) {
-		b.answerCallbackQuery(query.ID, "⏰ Das Gyroskop ist bereits abgelaufen!")
+	if !gyroskop.IsOpen {
+		b.answerCallbackQuery(query.ID, "❌ Gyroskop ist bereits geschlossen")
 		return
 	}
 
-	// Aktuelle Bestellung des Users laden
-	currentOrders, err := b.db.GetOrdersByGyroskop(gyroskop.ID)
-	if err != nil {
-		log.Printf("Fehler beim Laden der aktuellen Bestellungen: %v", err)
-		b.answerCallbackQuery(query.ID, "❌ Fehler beim Laden der Bestellungen")
+	// Validate option index
+	if optionIndex < 0 || optionIndex >= len(gyroskop.FoodOptions) {
+		b.answerCallbackQuery(query.ID, "❌ Ungültige Option")
 		return
 	}
 
-	var currentMeat, currentVeggie int
-	for _, order := range currentOrders {
-		if order.UserID == int64(query.From.ID) {
-			currentMeat = order.QuantityMeat
-			currentVeggie = order.QuantityVeggie
-			break
-		}
+	selectedOption := gyroskop.FoodOptions[optionIndex]
+
+	// Load current order
+	currentQuantities := make(map[string]int)
+	existingOrder, err := b.db.GetOrder(gyroskop.ID, int64(query.From.ID))
+	if err == nil {
+		currentQuantities = existingOrder.Quantities
 	}
 
-	// Neue Werte basierend auf Gyros-Typ setzen
-	var newMeat, newVeggie int
-	var responseText string
+	// Update quantity for selected option
+	currentQuantities[selectedOption] = quantity
 
-	if gyrosType == 'm' {
-		// Fleisch-Gyros
-		newMeat = quantity
-		newVeggie = currentVeggie
-		if quantity == 1 {
-			responseText = "✅ 1 Gyros mit Fleisch"
-		} else {
-			responseText = fmt.Sprintf("✅ %d Gyros mit Fleisch", quantity)
-		}
-	} else if gyrosType == 'v' {
-		// Vegetarische Gyros
-		newMeat = currentMeat
-		newVeggie = quantity
-		if quantity == 1 {
-			responseText = "✅ 1 vegetarisches Gyros"
-		} else {
-			responseText = fmt.Sprintf("✅ %d vegetarische Gyros", quantity)
-		}
-	}
-
-	// Bestellung hinzufügen/aktualisieren
+	// Add or update order
 	err = b.db.AddOrUpdateOrder(
 		gyroskop.ID,
 		int64(query.From.ID),
 		query.From.UserName,
 		query.From.FirstName,
 		query.From.LastName,
-		newMeat,
-		newVeggie,
+		currentQuantities,
 	)
 	if err != nil {
 		log.Printf("Error adding order: %v", err)
 		b.answerCallbackQuery(query.ID, "❌ Fehler beim Bestellen")
 		return
+	}
+
+	var responseText string
+	if quantity == 1 {
+		responseText = fmt.Sprintf("✅ 1 %s", selectedOption)
+	} else {
+		responseText = fmt.Sprintf("✅ %d %s", quantity, selectedOption)
 	}
 
 	b.answerCallbackQuery(query.ID, responseText)
@@ -713,36 +832,31 @@ func (b *Bot) formatCurrentStatus(gyroskop *database.Gyroskop, orders []database
 		return text.String()
 	}
 
-	totalMeat := 0
-	totalVeggie := 0
+	totals := make(map[string]int)
 
 	for _, order := range orders {
 		name := b.formatUserName(&order)
-		var orderText string
-
-		if order.QuantityMeat > 0 && order.QuantityVeggie > 0 {
-			orderText = fmt.Sprintf("🥩 %d mit Fleisch, 🥬 %d vegetarisch", order.QuantityMeat, order.QuantityVeggie)
-		} else if order.QuantityMeat > 0 {
-			if order.QuantityMeat == 1 {
-				orderText = "🥩 1 mit Fleisch"
-			} else {
-				orderText = fmt.Sprintf("🥩 %d mit Fleisch", order.QuantityMeat)
-			}
-		} else if order.QuantityVeggie > 0 {
-			if order.QuantityVeggie == 1 {
-				orderText = "🥬 1 vegetarisch"
-			} else {
-				orderText = fmt.Sprintf("🥬 %d vegetarisch", order.QuantityVeggie)
-			}
-		}
+		orderText := b.formatOrderQuantities(order.Quantities, gyroskop.FoodOptions)
 
 		text.WriteString(fmt.Sprintf("• %s: %s\n", name, orderText))
-		totalMeat += order.QuantityMeat
-		totalVeggie += order.QuantityVeggie
+
+		// Add to totals
+		for option, qty := range order.Quantities {
+			totals[option] += qty
+		}
 	}
 
-	totalGyros := totalMeat + totalVeggie
-	text.WriteString(fmt.Sprintf("\n🥙 *Gesamt: %d Gyros* (🥩 %d mit Fleisch, 🥬 %d vegetarisch)", totalGyros, totalMeat, totalVeggie))
+	// Format totals
+	var totalItems int
+	var totalParts []string
+	for _, option := range gyroskop.FoodOptions {
+		if qty, ok := totals[option]; ok && qty > 0 {
+			totalItems += qty
+			totalParts = append(totalParts, fmt.Sprintf("%d %s", qty, option))
+		}
+	}
+
+	text.WriteString(fmt.Sprintf("\n🥙 *Gesamt: %d* (%s)", totalItems, strings.Join(totalParts, ", ")))
 	return text.String()
 }
 
@@ -754,7 +868,7 @@ func (b *Bot) formatOrderSummary(gyroskop *database.Gyroskop, orders []database.
 	berlin, _ := time.LoadLocation("Europe/Berlin")
 	deadlineInBerlin := gyroskop.Deadline.In(berlin)
 
-	text.WriteString("📊 *Finale Bestellübersicht*\n")
+	text.WriteString(fmt.Sprintf("📊 *%s - Finale Bestellübersicht*\n", gyroskop.Name))
 	text.WriteString(fmt.Sprintf("⏰ Deadline war: %s Uhr\n\n", deadlineInBerlin.Format("15:04")))
 
 	if len(orders) == 0 {
@@ -762,36 +876,31 @@ func (b *Bot) formatOrderSummary(gyroskop *database.Gyroskop, orders []database.
 		return text.String()
 	}
 
-	totalMeat := 0
-	totalVeggie := 0
+	totals := make(map[string]int)
 
 	for _, order := range orders {
 		name := b.formatUserName(&order)
-		var orderText string
-
-		if order.QuantityMeat > 0 && order.QuantityVeggie > 0 {
-			orderText = fmt.Sprintf("🥩 %d mit Fleisch, 🥬 %d vegetarisch", order.QuantityMeat, order.QuantityVeggie)
-		} else if order.QuantityMeat > 0 {
-			if order.QuantityMeat == 1 {
-				orderText = "🥩 1 mit Fleisch"
-			} else {
-				orderText = fmt.Sprintf("🥩 %d mit Fleisch", order.QuantityMeat)
-			}
-		} else if order.QuantityVeggie > 0 {
-			if order.QuantityVeggie == 1 {
-				orderText = "🥬 1 vegetarisch"
-			} else {
-				orderText = fmt.Sprintf("🥬 %d vegetarisch", order.QuantityVeggie)
-			}
-		}
+		orderText := b.formatOrderQuantities(order.Quantities, gyroskop.FoodOptions)
 
 		text.WriteString(fmt.Sprintf("• %s: %s\n", name, orderText))
-		totalMeat += order.QuantityMeat
-		totalVeggie += order.QuantityVeggie
+
+		// Add to totals
+		for option, qty := range order.Quantities {
+			totals[option] += qty
+		}
 	}
 
-	totalGyros := totalMeat + totalVeggie
-	text.WriteString(fmt.Sprintf("\n🥙 *Gesamt: %d Gyros* (🥩 %d mit Fleisch, 🥬 %d vegetarisch)", totalGyros, totalMeat, totalVeggie))
+	// Format totals
+	var totalItems int
+	var totalParts []string
+	for _, option := range gyroskop.FoodOptions {
+		if qty, ok := totals[option]; ok && qty > 0 {
+			totalItems += qty
+			totalParts = append(totalParts, fmt.Sprintf("%d %s", qty, option))
+		}
+	}
+
+	text.WriteString(fmt.Sprintf("\n🥙 *Gesamt: %d* (%s)", totalItems, strings.Join(totalParts, ", ")))
 	return text.String()
 }
 
@@ -833,34 +942,39 @@ func (b *Bot) sendMessage(chatID int64, text string) {
 	}
 }
 
+// createFoodOptionsKeyboard creates an inline keyboard based on food options
+func (b *Bot) createFoodOptionsKeyboard(foodOptions []string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	// Create rows for each food option
+	for i, option := range foodOptions {
+		// Add header row
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(option+":", "noop"),
+		))
+
+		// Add button row for quantities 1-5
+		// Format: g<index>_<quantity>
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("1️⃣", fmt.Sprintf("g%d_1", i)),
+			tgbotapi.NewInlineKeyboardButtonData("2️⃣", fmt.Sprintf("g%d_2", i)),
+			tgbotapi.NewInlineKeyboardButtonData("3️⃣", fmt.Sprintf("g%d_3", i)),
+			tgbotapi.NewInlineKeyboardButtonData("4️⃣", fmt.Sprintf("g%d_4", i)),
+			tgbotapi.NewInlineKeyboardButtonData("5️⃣", fmt.Sprintf("g%d_5", i)),
+		))
+	}
+
+	// Add cancel button
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("❌ Stornieren", "g0"),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
 // sendMessageWithReactions sendet eine Nachricht mit Reaction-Buttons
-func (b *Bot) sendMessageWithReactions(chatID int64, text string) *tgbotapi.Message {
-	// Inline Keyboard mit Reaction-Buttons für beide Gyros-Arten erstellen
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🥩 Mit Fleisch:", "noop"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("1️⃣", "gm1"),
-			tgbotapi.NewInlineKeyboardButtonData("2️⃣", "gm2"),
-			tgbotapi.NewInlineKeyboardButtonData("3️⃣", "gm3"),
-			tgbotapi.NewInlineKeyboardButtonData("4️⃣", "gm4"),
-			tgbotapi.NewInlineKeyboardButtonData("5️⃣", "gm5"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🥬 Vegetarisch:", "noop"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("1️⃣", "gv1"),
-			tgbotapi.NewInlineKeyboardButtonData("2️⃣", "gv2"),
-			tgbotapi.NewInlineKeyboardButtonData("3️⃣", "gv3"),
-			tgbotapi.NewInlineKeyboardButtonData("4️⃣", "gv4"),
-			tgbotapi.NewInlineKeyboardButtonData("5️⃣", "gv5"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("❌ Stornieren", "g0"),
-		),
-	)
+func (b *Bot) sendMessageWithReactions(chatID int64, text string, foodOptions []string) *tgbotapi.Message {
+	keyboard := b.createFoodOptionsKeyboard(foodOptions)
 
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = tgbotapi.ModeMarkdown
@@ -916,79 +1030,56 @@ func (b *Bot) updateGyroskopMessage(gyroskop *database.Gyroskop, originalMessage
 	deadlineInBerlin := gyroskop.Deadline.In(berlin)
 
 	// Neue Nachricht zusammenstellen
-	text := fmt.Sprintf("🥙 *Gyroskop geöffnet!*\n\n"+
+	text := fmt.Sprintf("🥙 *%s geöffnet!*\n\n"+
 		"👤 Erstellt von: %s\n"+
 		"⏰ Deadline: %s Uhr\n\n",
+		gyroskop.Name,
 		creatorName,
 		deadlineInBerlin.Format("15:04"))
 
 	// Aktuelle Bestellungen hinzufügen
 	if len(orders) > 0 {
 		text += "📋 *Aktuelle Bestellungen:*\n"
-		totalMeat := 0
-		totalVeggie := 0
+		totals := make(map[string]int)
 
 		for _, order := range orders {
 			name := b.formatUserName(&order)
-			var orderText string
-
-			if order.QuantityMeat > 0 && order.QuantityVeggie > 0 {
-				orderText = fmt.Sprintf("🥩 %d mit Fleisch, 🥬 %d vegetarisch", order.QuantityMeat, order.QuantityVeggie)
-			} else if order.QuantityMeat > 0 {
-				if order.QuantityMeat == 1 {
-					orderText = "🥩 1 mit Fleisch"
-				} else {
-					orderText = fmt.Sprintf("🥩 %d mit Fleisch", order.QuantityMeat)
-				}
-			} else if order.QuantityVeggie > 0 {
-				if order.QuantityVeggie == 1 {
-					orderText = "🥬 1 vegetarisch"
-				} else {
-					orderText = fmt.Sprintf("🥬 %d vegetarisch", order.QuantityVeggie)
-				}
-			}
+			orderText := b.formatOrderQuantities(order.Quantities, gyroskop.FoodOptions)
 
 			text += fmt.Sprintf("• %s: %s\n", name, orderText)
-			totalMeat += order.QuantityMeat
-			totalVeggie += order.QuantityVeggie
+
+			// Add to totals
+			for option, qty := range order.Quantities {
+				totals[option] += qty
+			}
 		}
 
-		totalGyros := totalMeat + totalVeggie
-		text += fmt.Sprintf("\n🥙 *Aktuell: %d Gyros* (🥩 %d mit Fleisch, 🥬 %d vegetarisch)\n\n", totalGyros, totalMeat, totalVeggie)
+		// Format totals
+		var totalItems int
+		var totalParts []string
+		for _, option := range gyroskop.FoodOptions {
+			if qty, ok := totals[option]; ok && qty > 0 {
+				totalItems += qty
+				totalParts = append(totalParts, fmt.Sprintf("%d %s", qty, option))
+			}
+		}
+
+		text += fmt.Sprintf("\n🥙 *Aktuell: %d* (%s)\n\n", totalItems, strings.Join(totalParts, ", "))
 	} else {
 		text += "📋 *Noch keine Bestellungen*\n\n"
 	}
 
-	text += "Zum Bestellen schreibt '2f' (Fleisch), '3v' (vegetarisch), '1f2v' (gemischt)!\n"
-	text += "Oder nutzt die Buttons für 🥩 Fleisch oder 🥬 vegetarisch\n\n"
+	// Generate example orders
+	var examples []string
+	for _, option := range gyroskop.FoodOptions {
+		examples = append(examples, fmt.Sprintf("'2 %s'", strings.ToLower(option)))
+	}
+
+	text += fmt.Sprintf("Zum Bestellen schreibt %s oder nutzt die Buttons unten.\n\n", strings.Join(examples, ", "))
 	text += "Zum Beenden: /ende"
 
-	// Inline Keyboard mit Reaction-Buttons für beide Gyros-Arten erstellen
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🥩 Mit Fleisch:", "noop"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("1️⃣", "gm1"),
-			tgbotapi.NewInlineKeyboardButtonData("2️⃣", "gm2"),
-			tgbotapi.NewInlineKeyboardButtonData("3️⃣", "gm3"),
-			tgbotapi.NewInlineKeyboardButtonData("4️⃣", "gm4"),
-			tgbotapi.NewInlineKeyboardButtonData("5️⃣", "gm5"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🥬 Vegetarisch:", "noop"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("1️⃣", "gv1"),
-			tgbotapi.NewInlineKeyboardButtonData("2️⃣", "gv2"),
-			tgbotapi.NewInlineKeyboardButtonData("3️⃣", "gv3"),
-			tgbotapi.NewInlineKeyboardButtonData("4️⃣", "gv4"),
-			tgbotapi.NewInlineKeyboardButtonData("5️⃣", "gv5"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("❌ Stornieren", "g0"),
-		),
-	)
+	// Inline Keyboard mit Reaction-Buttons dynamisch erstellen
+	keyboard := b.createFoodOptionsKeyboard(gyroskop.FoodOptions)
 
 	// Nachricht editieren
 	edit := tgbotapi.NewEditMessageText(originalMessage.Chat.ID, messageID, text)
